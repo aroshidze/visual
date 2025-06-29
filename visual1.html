@@ -42,31 +42,45 @@
 
         // --- Configuration ---
         const config = {
-            particleCount: 150,
-            dustCount: 300, // NEW: For background dust
-            noiseScale: 0.006,
-            baseSpeed: 1.0,
-            attractionForce: 0.7,
-            gravityWellForce: 30,
-            trailLength: 12,
+            particleCount: 180, // Increased for a denser, more constant field
+            dustCount: 300,
+            neuralConnectionDistance: 80, 
+            noiseScale: 0.009, 
+            midNoiseScale: 0.004, 
+            largeNoiseScale: 0.0005,
+            baseSpeed: 1.2,
+            gravityWellForce: 60, // Slightly more powerful gravity
+            trailLength: 15,
             feedbackZoom: 1.002,
             feedbackRotate: 0.001,
             kaleidoscopeSlices: 6,
-            mouseMoveWarpFactor: 0.0005,
+            mouseMoveWarpFactor: 0.0008,
+            maxParticleSpeed: 30, 
         };
 
         // --- Data-Oriented Particle Data ---
         let pX = new Float32Array(config.particleCount);
         let pY = new Float32Array(config.particleCount);
+        let pVX = new Float32Array(config.particleCount);
+        let pVY = new Float32Array(config.particleCount);
         let pSpeed = new Float32Array(config.particleCount);
+        let pInertia = new Float32Array(config.particleCount);
         let pHistory = [];
-        // NEW: Data for cosmic dust
         let dX = new Float32Array(config.dustCount);
         let dY = new Float32Array(config.dustCount);
 
         // --- Audio Engine State ---
         let audioStarted = false;
-        let drone, autoFilter, vibrato, sparkle, delay;
+        let drone, autoFilter, vibrato, sparkle, delay, panner, thump, arp;
+        
+        const palettes = [
+            { bg: 190, main: 330, accent: 50 },
+            { bg: 280, main: 120, accent: 0 },
+            { bg: 220, main: 30, accent: 200 },
+            { bg: 0, main: 180, accent: 240 },
+            { bg: 330, main: 150, accent: 60 },
+        ];
+        let currentPalette = palettes[0];
 
         const noise = (function() {
             const p = new Uint8Array(512);
@@ -95,30 +109,24 @@
             if (audioStarted) return;
             Tone.start();
             
-            // Background Drone
-            autoFilter = new Tone.AutoFilter("4n").toDestination().start();
+            panner = new Tone.Panner(0).toDestination();
+            autoFilter = new Tone.AutoFilter("4n").connect(panner).start();
             vibrato = new Tone.Vibrato("8n", 0.2).connect(autoFilter);
-            drone = new Tone.FMSynth({
-                harmonicity: 1.5,
-                modulationIndex: 10,
-                detune: 0,
-                oscillator: { type: "sine" },
-                envelope: { attack: 2, decay: 1, sustain: 1, release: 2 },
-                modulation: { type: "square" },
-                modulationEnvelope: { attack: 0.5, decay: 0, sustain: 1, release: 0.5 }
-            }).connect(vibrato);
+            drone = new Tone.FMSynth({ harmonicity: 1.5, modulationIndex: 10, envelope: { attack: 2, decay: 1, sustain: 1, release: 2 } }).connect(vibrato);
             drone.triggerAttack("C2");
 
-            // Sparkle effects for mouse movement
             delay = new Tone.FeedbackDelay("8n", 0.5).toDestination();
-            sparkle = new Tone.MetalSynth({
-                frequency: 200,
-                envelope: { attack: 0.001, decay: 0.1, release: 0.01 },
-                harmonicity: 5.1,
-                modulationIndex: 32,
-                resonance: 4000,
-                octaves: 1.5
-            }).connect(delay);
+            sparkle = new Tone.MetalSynth({ frequency: 200, envelope: { attack: 0.001, decay: 0.1, release: 0.01 }, harmonicity: 5.1, modulationIndex: 32, resonance: 4000, octaves: 1.5 }).connect(delay);
+
+            thump = new Tone.MembraneSynth({ pitchDecay: 0.05, octaves: 10, oscillator: { type: "sine" }, envelope: { attack: 0.001, decay: 0.4, sustain: 0.01, release: 1.4, attackCurve: "exponential" } }).toDestination();
+
+            const synth = new Tone.PolySynth(Tone.FMSynth, { volume: -12, modulationIndex: 1.2, harmonicity: 1.5 }).toDestination();
+            arp = new Tone.Pattern(function(time, note){
+                synth.triggerAttackRelease(note, "16n", time);
+            }, ["C4", "E4", "G4", "B4"], "up");
+            arp.interval = "16n";
+            arp.probability = 0.8;
+            Tone.Transport.start();
 
             audioStarted = true;
         }
@@ -133,30 +141,58 @@
             for (let i = 0; i < config.particleCount; i++) {
                 pX[i] = (Math.random() - 0.5) * width;
                 pY[i] = (Math.random() - 0.5) * height;
+                pVX[i] = 0;
+                pVY[i] = 0;
                 pSpeed[i] = config.baseSpeed + Math.random() * 0.5;
+                pInertia[i] = 0.85 + Math.random() * 0.1; 
                 pHistory.push([]);
             }
-            // NEW: Initialize dust particles
             for (let i = 0; i < config.dustCount; i++) {
                 dX[i] = Math.random() * width;
                 dY[i] = Math.random() * height;
             }
         }
         
-        function animate() {
-            if (canvas.width === 0 || canvas.height === 0) {
-                requestAnimationFrame(animate); return;
+        function drawPsychedelicBackground(palette, shock) {
+            ctx.save();
+            ctx.globalCompositeOperation = 'overlay';
+            ctx.globalAlpha = 0.2 + shock * 0.3; 
+
+            for (let i = 0; i < 5; i++) {
+                const angle = time * 0.05 + i * Math.PI * 2 / 5 + shock * 0.5;
+                const lensDistortion = Math.sin(time + i) * 0.2 + 1;
+                const x = width * 0.5 + Math.sin(angle) * width * 0.3 * lensDistortion;
+                const y = height * 0.5 + Math.cos(angle) * height * 0.3 * lensDistortion;
+                const radius = width * 0.15 + Math.sin(time * 0.1 + i) * width * 0.15;
+                const hue = (palette.bg + i * 72 + shock * 180) % 360;
+
+                const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
+                grad.addColorStop(0, `hsla(${hue}, 100%, 70%, 0.7)`);
+                grad.addColorStop(1, `hsla(${hue}, 100%, 50%, 0)`);
+                ctx.fillStyle = grad;
+                ctx.beginPath();
+                ctx.arc(x, y, radius, 0, Math.PI * 2);
+                ctx.fill();
             }
+            ctx.restore();
+        }
+
+        function animate() {
+            if (canvas.width === 0 || canvas.height === 0) { requestAnimationFrame(animate); return; }
+            
+            const paletteIndex = Math.floor(time * 0.08) % palettes.length;
+            currentPalette = palettes[paletteIndex];
 
             ctx.globalCompositeOperation = 'source-over';
-            
+            drawPsychedelicBackground(currentPalette, shockwave);
+
             shockwave *= 0.95;
             mouse.speed *= 0.95;
             
-            const breathing = noise(time * 0.1, 100, 200) * 0.001;
+            const breathing = noise(time * 0.1, 100, 200) * 0.002;
             const warp = mouse.speed * config.mouseMoveWarpFactor;
-            const zoom = config.feedbackZoom + shockwave * 0.05 + warp + breathing;
-            const rotate = config.feedbackRotate + shockwave * 0.02 + warp - breathing;
+            const zoom = config.feedbackZoom + shockwave * 0.1 + warp + breathing;
+            const rotate = config.feedbackRotate + shockwave * 0.05 + warp - breathing;
 
             ctx.save();
             ctx.translate(width / 2, height / 2);
@@ -165,30 +201,56 @@
             ctx.drawImage(canvas, -width / 2, -height / 2, width, height);
             ctx.restore();
 
-            const bgHue = time * 20;
-            ctx.fillStyle = `hsla(${bgHue % 360}, 100%, 5%, 0.15)`;
+            const bgHue = (currentPalette.bg + time * 30) % 360;
+            ctx.fillStyle = `hsla(${bgHue}, 100%, 5%, 0.1)`;
             ctx.fillRect(0, 0, width, height);
 
-            // NEW: Draw cosmic dust
-            ctx.fillStyle = 'hsla(255, 255%, 255%, 0.3)';
+            ctx.fillStyle = `hsla(${(currentPalette.accent + 180)%360}, 100%, 90%, 0.3)`;
             for (let i = 0; i < config.dustCount; i++) {
-                dX[i] = (dX[i] - 0.1 + width) % width; // Slow drift
+                dX[i] = (dX[i] - 0.1 + width) % width;
                 ctx.fillRect(dX[i], dY[i], 1, 1);
             }
 
             ctx.save();
             ctx.translate(width / 2, height / 2);
             
-            for (let k = 0; k < config.kaleidoscopeSlices; k++) {
-                ctx.rotate(Math.PI * 2 / config.kaleidoscopeSlices);
+            const dynamicSlices = Math.floor(4 + Math.sin(time * 0.2) * 2 + Math.cos(time * 0.35) * 2);
+
+            for (let k = 0; k < dynamicSlices; k++) {
+                ctx.rotate(Math.PI * 2 / dynamicSlices);
                 
                 ctx.globalCompositeOperation = 'lighter';
                 
                 if (k === 0) {
                     for (let i = 0; i < config.particleCount; i++) {
-                        const angle = noise(pX[i] * config.noiseScale, pY[i] * config.noiseScale, time * 0.5) * Math.PI * 4;
-                        let vx = Math.cos(angle) * pSpeed[i];
-                        let vy = Math.sin(angle) * pSpeed[i];
+                        for (let j = i + 1; j < config.particleCount; j++) {
+                            const dx = pX[i] - pX[j];
+                            const dy = pY[i] - pY[j];
+                            const distSq = dx * dx + dy * dy;
+                            if (distSq < config.neuralConnectionDistance * config.neuralConnectionDistance) {
+                                ctx.beginPath();
+                                ctx.moveTo(pX[i], pY[i]);
+                                ctx.lineTo(pX[j], pY[j]);
+                                const opacity = 1 - (distSq / (config.neuralConnectionDistance * config.neuralConnectionDistance));
+                                ctx.strokeStyle = `hsla(${(currentPalette.accent + time * 100)%360}, 100%, 80%, ${opacity * 0.2})`;
+                                ctx.lineWidth = 0.5;
+                                ctx.stroke();
+                            }
+                        }
+
+                        // Particle physics
+                        const angle1 = noise(pX[i] * config.noiseScale, pY[i] * config.noiseScale, time * 0.5) * Math.PI * 4;
+                        const angle2 = noise(pX[i] * config.midNoiseScale, pY[i] * config.midNoiseScale, time * 0.2) * Math.PI * 3;
+                        const angle3 = noise(pX[i] * config.largeNoiseScale, pY[i] * config.largeNoiseScale, time * 0.1) * Math.PI * 2;
+                        
+                        let targetVX = (Math.cos(angle1) + Math.cos(angle2) + Math.cos(angle3)) * pSpeed[i] * 0.5;
+                        let targetVY = (Math.sin(angle1) + Math.sin(angle2) + Math.sin(angle3)) * pSpeed[i] * 0.5;
+                        
+                        pVX[i] = pVX[i] * pInertia[i] + targetVX * (1-pInertia[i]);
+                        pVY[i] = pVY[i] * pInertia[i] + targetVY * (1-pInertia[i]);
+
+                        let finalVX = pVX[i];
+                        let finalVY = pVY[i];
 
                         if (mouse.isActive) {
                             const mx = mouse.x - width / 2;
@@ -199,27 +261,36 @@
                             
                             if(mouse.isDown) {
                                 const force = Math.max(0, config.gravityWellForce / (distSq * 0.001 + 1));
-                                vx += (dx / Math.sqrt(distSq + 1)) * force;
-                                vy += (dy / Math.sqrt(distSq + 1)) * force;
+                                finalVX += (dx / Math.sqrt(distSq + 1)) * force;
+                                finalVY += (dy / Math.sqrt(distSq + 1)) * force;
                             } else if (distSq < mouse.radius * mouse.radius && distSq > 1) {
                                 const dist = Math.sqrt(distSq);
                                 const force = (mouse.radius - dist) / mouse.radius;
-                                vx += (dx / dist) * force * config.attractionForce;
-                                vy += (dy / dist) * force * config.attractionForce;
+                                finalVX += (dx / dist) * force * config.attractionForce;
+                                finalVY += (dy / dist) * force * config.attractionForce;
                             }
                         }
-                        
-                        pX[i] += vx;
-                        pY[i] += vy;
+
+                        const speedSq = finalVX * finalVX + finalVY * finalVY;
+                        if (speedSq > config.maxParticleSpeed * config.maxParticleSpeed) {
+                            const speed = Math.sqrt(speedSq);
+                            finalVX = (finalVX / speed) * config.maxParticleSpeed;
+                            finalVY = (finalVY / speed) * config.maxParticleSpeed;
+                        }
+
+                        pX[i] += finalVX; pY[i] += finalVY;
 
                         const history = pHistory[i];
                         history.push({ x: pX[i], y: pY[i] });
                         if (history.length > config.trailLength) history.shift();
-                        if (Math.abs(pX[i]) > width * 1.5 || Math.abs(pY[i]) > height * 1.5) {
-                            pX[i] = (Math.random() - 0.5) * width;
-                            pY[i] = (Math.random() - 0.5) * height;
-                            history.length = 0;
-                        }
+                        
+                        // FIX: Definitive Particle Wrapping Logic
+                        const boundaryX = width / 2 + 50;
+                        const boundaryY = height / 2 + 50;
+                        if (pX[i] > boundaryX) { pX[i] -= boundaryX * 2; history.length = 0; }
+                        else if (pX[i] < -boundaryX) { pX[i] += boundaryX * 2; history.length = 0; }
+                        if (pY[i] > boundaryY) { pY[i] -= boundaryY * 2; history.length = 0; }
+                        else if (pY[i] < -boundaryY) { pY[i] += boundaryY * 2; history.length = 0; }
                     }
                 }
                 
@@ -229,7 +300,7 @@
                         ctx.beginPath();
                         ctx.moveTo(history[0].x, history[0].y);
                         for (let j = 1; j < history.length; j++) ctx.lineTo(history[j].x, history[j].y);
-                        let hue = (pX[i] * 2 + time * 200);
+                        let hue = (currentPalette.main + pX[i] * 0.5 + time * 100);
                         if(mouse.isDown) hue += 180;
                         ctx.strokeStyle = `hsla(${hue % 360}, 100%, 70%, 0.8)`;
                         ctx.lineWidth = 1.5;
@@ -240,33 +311,32 @@
             ctx.restore();
 
             if (mouse.isActive) {
-                const orbRadius = mouse.isDown ? 40 : 25;
-                const pulse = Math.sin(time * 50) * 5 + shockwave * 20;
+                const orbRadius = mouse.isDown ? 60 : 25;
+                const pulse = Math.sin(time * 50) * 10 + shockwave * 30;
 
                 ctx.globalCompositeOperation = 'difference';
                 ctx.beginPath();
                 ctx.arc(mouse.x, mouse.y, orbRadius + pulse, 0, Math.PI * 2);
-                ctx.fillStyle = 'white';
+                ctx.fillStyle = `hsl(${(currentPalette.accent + time*100)%360}, 100%, 50%)`;
                 ctx.fill();
 
                 ctx.globalCompositeOperation = 'lighter';
                 ctx.beginPath();
-                ctx.arc(mouse.x, mouse.y, Math.max(0, orbRadius / 3 + pulse / 2), 0, Math.PI * 2);
-                const coreHue = time * 300;
-                ctx.fillStyle = `hsl(${coreHue % 360}, 100%, 80%)`;
+                ctx.arc(mouse.x, mouse.y, Math.max(0, orbRadius / 2 + pulse / 2), 0, Math.PI * 2);
+                const coreHue = (currentPalette.main + 180 + time * 300) % 360;
+                ctx.fillStyle = `hsl(${coreHue}, 100%, 80%)`;
                 ctx.fill();
             }
             
-            // --- AUDIO UPDATE ---
             if (audioStarted && mouse.isActive) {
-                const dronePitch = 40 + (mouse.x / width) * 60;
-                drone.frequency.rampTo(dronePitch, 0.1);
+                panner.pan.rampTo((mouse.x / width) * 2 - 1, 0.1);
                 autoFilter.baseFrequency = 200 + (mouse.y / height) * 8000;
-                
                 if (mouse.isDown) {
-                    drone.detune.rampTo(-1200, 0.05); // Dive bomb pitch
+                    drone.detune.rampTo(-1200, 0.05);
+                    arp.start(0);
                 } else {
                     drone.detune.rampTo(0, 0.5);
+                    arp.stop(0.1);
                 }
                 if (mouse.speed > 20 && Math.random() > 0.95) {
                     sparkle.triggerAttack();
@@ -304,10 +374,10 @@
             const deactivateMouse = () => { mouse.isActive = false; mouse.px = null; mouse.py = null; };
             canvas.addEventListener('mouseleave', deactivateMouse);
             
-            canvas.addEventListener('mousedown', () => mouse.isDown = true);
-            canvas.addEventListener('mouseup', () => mouse.isDown = false);
+            canvas.addEventListener('mousedown', () => { mouse.isDown = true; shockwave = 1; thump?.triggerAttackRelease("C1", "8n"); });
+            canvas.addEventListener('mouseup', () => { mouse.isDown = false; });
             
-            canvas.addEventListener('touchstart', (e) => { e.preventDefault(); mouse.isDown = true; updateMousePosition(e); }, { passive: false });
+            canvas.addEventListener('touchstart', (e) => { e.preventDefault(); mouse.isDown = true; shockwave = 1; thump?.triggerAttackRelease("C1", "8n"); updateMousePosition(e); }, { passive: false });
             canvas.addEventListener('touchend', () => { mouse.isDown = false; deactivateMouse(); });
 
             window.addEventListener('resize', setup);
