@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kaleidoscopic Fluid Simulation</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
     <style>
         /* Basic CSS reset to remove default margin and padding */
         body, html {
@@ -31,28 +32,22 @@
         // --- State Variables ---
         let width, height;
         let time = 0;
-        let shockwave = 0; // For click effect
+        let shockwave = 0;
         
         // --- Interactivity State ---
         const mouse = {
-            x: null,
-            y: null,
-            px: null, // Previous X
-            py: null, // Previous Y
-            speed: 0,
-            isActive: false,
-            isDown: false,
-            radius: 150 
+            x: null, y: null, px: null, py: null,
+            speed: 0, isActive: false, isDown: false, radius: 150 
         };
 
         // --- Configuration ---
         const config = {
-            particleCount: 150, // Reduced for kaleidoscope performance
+            particleCount: 150,
+            dustCount: 300, // NEW: For background dust
             noiseScale: 0.006,
             baseSpeed: 1.0,
             attractionForce: 0.7,
-            repulsionForce: 15,
-            gravityWellForce: 25, // NEW: Force for the gravity well
+            gravityWellForce: 30,
             trailLength: 12,
             feedbackZoom: 1.002,
             feedbackRotate: 0.001,
@@ -65,18 +60,21 @@
         let pY = new Float32Array(config.particleCount);
         let pSpeed = new Float32Array(config.particleCount);
         let pHistory = [];
+        // NEW: Data for cosmic dust
+        let dX = new Float32Array(config.dustCount);
+        let dY = new Float32Array(config.dustCount);
 
-        /**
-         * A self-contained Perlin Noise function for organic movement.
-         */
+        // --- Audio Engine State ---
+        let audioStarted = false;
+        let drone, autoFilter, vibrato, sparkle, delay;
+
         const noise = (function() {
             const p = new Uint8Array(512);
             for (let i = 0; i < 256; i++) p[i] = p[i + 256] = Math.floor(Math.random() * 256);
             const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
             const lerp = (t, a, b) => a + t * (b - a);
             const grad = (hash, x, y, z) => {
-                const h = hash & 15;
-                const u = h < 8 ? x : y;
+                const h = hash & 15; const u = h < 8 ? x : y;
                 const v = h < 4 ? y : h === 12 || h === 14 ? x : z;
                 return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
             };
@@ -93,6 +91,38 @@
             };
         })();
 
+        function setupAudio() {
+            if (audioStarted) return;
+            Tone.start();
+            
+            // Background Drone
+            autoFilter = new Tone.AutoFilter("4n").toDestination().start();
+            vibrato = new Tone.Vibrato("8n", 0.2).connect(autoFilter);
+            drone = new Tone.FMSynth({
+                harmonicity: 1.5,
+                modulationIndex: 10,
+                detune: 0,
+                oscillator: { type: "sine" },
+                envelope: { attack: 2, decay: 1, sustain: 1, release: 2 },
+                modulation: { type: "square" },
+                modulationEnvelope: { attack: 0.5, decay: 0, sustain: 1, release: 0.5 }
+            }).connect(vibrato);
+            drone.triggerAttack("C2");
+
+            // Sparkle effects for mouse movement
+            delay = new Tone.FeedbackDelay("8n", 0.5).toDestination();
+            sparkle = new Tone.MetalSynth({
+                frequency: 200,
+                envelope: { attack: 0.001, decay: 0.1, release: 0.01 },
+                harmonicity: 5.1,
+                modulationIndex: 32,
+                resonance: 4000,
+                octaves: 1.5
+            }).connect(delay);
+
+            audioStarted = true;
+        }
+
         function setup() {
             width = window.innerWidth;
             height = window.innerHeight;
@@ -106,12 +136,16 @@
                 pSpeed[i] = config.baseSpeed + Math.random() * 0.5;
                 pHistory.push([]);
             }
+            // NEW: Initialize dust particles
+            for (let i = 0; i < config.dustCount; i++) {
+                dX[i] = Math.random() * width;
+                dY[i] = Math.random() * height;
+            }
         }
         
         function animate() {
             if (canvas.width === 0 || canvas.height === 0) {
-                requestAnimationFrame(animate);
-                return;
+                requestAnimationFrame(animate); return;
             }
 
             ctx.globalCompositeOperation = 'source-over';
@@ -119,9 +153,7 @@
             shockwave *= 0.95;
             mouse.speed *= 0.95;
             
-            // NEW: Add a subtle, chaotic "breathing" to the feedback loop
             const breathing = noise(time * 0.1, 100, 200) * 0.001;
-            
             const warp = mouse.speed * config.mouseMoveWarpFactor;
             const zoom = config.feedbackZoom + shockwave * 0.05 + warp + breathing;
             const rotate = config.feedbackRotate + shockwave * 0.02 + warp - breathing;
@@ -136,6 +168,13 @@
             const bgHue = time * 20;
             ctx.fillStyle = `hsla(${bgHue % 360}, 100%, 5%, 0.15)`;
             ctx.fillRect(0, 0, width, height);
+
+            // NEW: Draw cosmic dust
+            ctx.fillStyle = 'hsla(255, 255%, 255%, 0.3)';
+            for (let i = 0; i < config.dustCount; i++) {
+                dX[i] = (dX[i] - 0.1 + width) % width; // Slow drift
+                ctx.fillRect(dX[i], dY[i], 1, 1);
+            }
 
             ctx.save();
             ctx.translate(width / 2, height / 2);
@@ -158,11 +197,11 @@
                             const dy = my - pY[i];
                             const distSq = dx * dx + dy * dy;
                             
-                            if(mouse.isDown) { // NEW: Gravity Well logic
-                                const force = Math.max(0, config.gravityWellForce / (distSq * 0.001));
-                                vx += (dx / Math.sqrt(distSq)) * force;
-                                vy += (dy / Math.sqrt(distSq)) * force;
-                            } else if (distSq < mouse.radius * mouse.radius && distSq > 1) { // Attract
+                            if(mouse.isDown) {
+                                const force = Math.max(0, config.gravityWellForce / (distSq * 0.001 + 1));
+                                vx += (dx / Math.sqrt(distSq + 1)) * force;
+                                vy += (dy / Math.sqrt(distSq + 1)) * force;
+                            } else if (distSq < mouse.radius * mouse.radius && distSq > 1) {
                                 const dist = Math.sqrt(distSq);
                                 const force = (mouse.radius - dist) / mouse.radius;
                                 vx += (dx / dist) * force * config.attractionForce;
@@ -175,10 +214,7 @@
 
                         const history = pHistory[i];
                         history.push({ x: pX[i], y: pY[i] });
-                        if (history.length > config.trailLength) {
-                            history.shift();
-                        }
-
+                        if (history.length > config.trailLength) history.shift();
                         if (Math.abs(pX[i]) > width * 1.5 || Math.abs(pY[i]) > height * 1.5) {
                             pX[i] = (Math.random() - 0.5) * width;
                             pY[i] = (Math.random() - 0.5) * height;
@@ -192,9 +228,7 @@
                     if (history.length > 1) {
                         ctx.beginPath();
                         ctx.moveTo(history[0].x, history[0].y);
-                        for (let j = 1; j < history.length; j++) {
-                            ctx.lineTo(history[j].x, history[j].y);
-                        }
+                        for (let j = 1; j < history.length; j++) ctx.lineTo(history[j].x, history[j].y);
                         let hue = (pX[i] * 2 + time * 200);
                         if(mouse.isDown) hue += 180;
                         ctx.strokeStyle = `hsla(${hue % 360}, 100%, 70%, 0.8)`;
@@ -222,6 +256,22 @@
                 ctx.fillStyle = `hsl(${coreHue % 360}, 100%, 80%)`;
                 ctx.fill();
             }
+            
+            // --- AUDIO UPDATE ---
+            if (audioStarted && mouse.isActive) {
+                const dronePitch = 40 + (mouse.x / width) * 60;
+                drone.frequency.rampTo(dronePitch, 0.1);
+                autoFilter.baseFrequency = 200 + (mouse.y / height) * 8000;
+                
+                if (mouse.isDown) {
+                    drone.detune.rampTo(-1200, 0.05); // Dive bomb pitch
+                } else {
+                    drone.detune.rampTo(0, 0.5);
+                }
+                if (mouse.speed > 20 && Math.random() > 0.95) {
+                    sparkle.triggerAttack();
+                }
+            }
 
             time += 0.003;
             requestAnimationFrame(animate);
@@ -231,45 +281,34 @@
             const updateMousePosition = (e) => {
                 const newX = e.touches ? e.touches[0].clientX : e.clientX;
                 const newY = e.touches ? e.touches[0].clientY : e.clientY;
-
                 if (typeof newX !== 'number' || typeof newY !== 'number') return;
-
                 if (mouse.px !== null && mouse.py !== null) {
                     const dx = newX - mouse.px;
                     const dy = newY - mouse.py;
                     mouse.speed = Math.sqrt(dx * dx + dy * dy);
                 }
-                
-                mouse.x = newX;
-                mouse.y = newY;
-                mouse.px = newX;
-                mouse.py = newY;
+                mouse.x = newX; mouse.y = newY; mouse.px = newX; mouse.py = newY;
                 mouse.isActive = true;
             };
+            const firstInteraction = () => {
+                setupAudio();
+                canvas.removeEventListener('mousedown', firstInteraction);
+                canvas.removeEventListener('touchstart', firstInteraction);
+            };
+            canvas.addEventListener('mousedown', firstInteraction, { once: true });
+            canvas.addEventListener('touchstart', firstInteraction, { once: true });
+
             canvas.addEventListener('mousemove', updateMousePosition);
             canvas.addEventListener('touchmove', updateMousePosition, { passive: false });
             
-            const deactivateMouse = () => {
-                mouse.isActive = false;
-                mouse.px = null;
-                mouse.py = null;
-            };
+            const deactivateMouse = () => { mouse.isActive = false; mouse.px = null; mouse.py = null; };
             canvas.addEventListener('mouseleave', deactivateMouse);
-
-            canvas.addEventListener('mousedown', () => { mouse.isDown = true; });
+            
+            canvas.addEventListener('mousedown', () => mouse.isDown = true);
             canvas.addEventListener('mouseup', () => mouse.isDown = false);
             
-            canvas.addEventListener('touchstart', (e) => { 
-                e.preventDefault(); 
-                mouse.isDown = true; 
-                updateMousePosition(e); 
-            }, { passive: false });
-            
-            // FIX: On touchend, deactivate the cursor entirely
-            canvas.addEventListener('touchend', () => {
-                mouse.isDown = false;
-                deactivateMouse();
-            });
+            canvas.addEventListener('touchstart', (e) => { e.preventDefault(); mouse.isDown = true; updateMousePosition(e); }, { passive: false });
+            canvas.addEventListener('touchend', () => { mouse.isDown = false; deactivateMouse(); });
 
             window.addEventListener('resize', setup);
         }
