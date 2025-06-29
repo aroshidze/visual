@@ -52,11 +52,12 @@
             baseSpeed: 1.0,
             attractionForce: 0.7,
             repulsionForce: 15,
+            gravityWellForce: 25, // NEW: Force for the gravity well
             trailLength: 12,
             feedbackZoom: 1.002,
             feedbackRotate: 0.001,
             kaleidoscopeSlices: 6,
-            mouseMoveWarpFactor: 0.0005, // How much mouse speed affects zoom/rotation
+            mouseMoveWarpFactor: 0.0005,
         };
 
         // --- Data-Oriented Particle Data ---
@@ -108,22 +109,22 @@
         }
         
         function animate() {
-            // FIX: Add a guard at the top of the animation loop.
-            // This prevents any drawing operations from executing if the canvas has no area,
-            // which resolves the "InvalidStateError" on initial load in some environments.
             if (canvas.width === 0 || canvas.height === 0) {
-                requestAnimationFrame(animate); // Keep the loop going, waiting for a valid size.
+                requestAnimationFrame(animate);
                 return;
             }
 
             ctx.globalCompositeOperation = 'source-over';
             
-            // --- 1. INTERACTIVE SHOCKWAVE & FEEDBACK LOOP ---
-            shockwave *= 0.95; // Dampen shockwave over time
-            mouse.speed *= 0.95; // Dampen mouse speed over time
+            shockwave *= 0.95;
+            mouse.speed *= 0.95;
+            
+            // NEW: Add a subtle, chaotic "breathing" to the feedback loop
+            const breathing = noise(time * 0.1, 100, 200) * 0.001;
+            
             const warp = mouse.speed * config.mouseMoveWarpFactor;
-            const zoom = config.feedbackZoom + shockwave * 0.05 + warp;
-            const rotate = config.feedbackRotate + shockwave * 0.02 + warp;
+            const zoom = config.feedbackZoom + shockwave * 0.05 + warp + breathing;
+            const rotate = config.feedbackRotate + shockwave * 0.02 + warp - breathing;
 
             ctx.save();
             ctx.translate(width / 2, height / 2);
@@ -132,21 +133,18 @@
             ctx.drawImage(canvas, -width / 2, -height / 2, width, height);
             ctx.restore();
 
-            // --- 2. DYNAMIC FADING EFFECT ---
             const bgHue = time * 20;
             ctx.fillStyle = `hsla(${bgHue % 360}, 100%, 5%, 0.15)`;
             ctx.fillRect(0, 0, width, height);
 
-            // --- 3. KALEIDOSCOPE RENDER ---
             ctx.save();
-            ctx.translate(width / 2, height / 2); // Center for kaleidoscope
+            ctx.translate(width / 2, height / 2);
             
             for (let k = 0; k < config.kaleidoscopeSlices; k++) {
                 ctx.rotate(Math.PI * 2 / config.kaleidoscopeSlices);
                 
                 ctx.globalCompositeOperation = 'lighter';
                 
-                // Particle Loop - physics only updated once
                 if (k === 0) {
                     for (let i = 0; i < config.particleCount; i++) {
                         const angle = noise(pX[i] * config.noiseScale, pY[i] * config.noiseScale, time * 0.5) * Math.PI * 4;
@@ -159,16 +157,16 @@
                             const dx = mx - pX[i];
                             const dy = my - pY[i];
                             const distSq = dx * dx + dy * dy;
-                            if (distSq < mouse.radius * mouse.radius && distSq > 1) {
+                            
+                            if(mouse.isDown) { // NEW: Gravity Well logic
+                                const force = Math.max(0, config.gravityWellForce / (distSq * 0.001));
+                                vx += (dx / Math.sqrt(distSq)) * force;
+                                vy += (dy / Math.sqrt(distSq)) * force;
+                            } else if (distSq < mouse.radius * mouse.radius && distSq > 1) { // Attract
                                 const dist = Math.sqrt(distSq);
                                 const force = (mouse.radius - dist) / mouse.radius;
-                                if(mouse.isDown) {
-                                    vx -= (dx / dist) * force * config.repulsionForce;
-                                    vy -= (dy / dist) * force * config.repulsionForce;
-                                } else {
-                                    vx += (dx / dist) * force * config.attractionForce;
-                                    vy += (dy / dist) * force * config.attractionForce;
-                                }
+                                vx += (dx / dist) * force * config.attractionForce;
+                                vy += (dy / dist) * force * config.attractionForce;
                             }
                         }
                         
@@ -181,7 +179,7 @@
                             history.shift();
                         }
 
-                        if (Math.abs(pX[i]) > width || Math.abs(pY[i]) > height) {
+                        if (Math.abs(pX[i]) > width * 1.5 || Math.abs(pY[i]) > height * 1.5) {
                             pX[i] = (Math.random() - 0.5) * width;
                             pY[i] = (Math.random() - 0.5) * height;
                             history.length = 0;
@@ -189,7 +187,6 @@
                     }
                 }
                 
-                // Draw trails for this slice
                 for (let i = 0; i < config.particleCount; i++) {
                     const history = pHistory[i];
                     if (history.length > 1) {
@@ -200,7 +197,7 @@
                         }
                         let hue = (pX[i] * 2 + time * 200);
                         if(mouse.isDown) hue += 180;
-                        ctx.strokeStyle = `hsl(${hue % 360}, 100%, 70%)`;
+                        ctx.strokeStyle = `hsla(${hue % 360}, 100%, 70%, 0.8)`;
                         ctx.lineWidth = 1.5;
                         ctx.stroke();
                     }
@@ -208,19 +205,16 @@
             }
             ctx.restore();
 
-            // --- 4. "SINGULARITY" CURSOR ---
             if (mouse.isActive) {
                 const orbRadius = mouse.isDown ? 40 : 25;
                 const pulse = Math.sin(time * 50) * 5 + shockwave * 20;
 
-                // Outer distortion field
                 ctx.globalCompositeOperation = 'difference';
                 ctx.beginPath();
                 ctx.arc(mouse.x, mouse.y, orbRadius + pulse, 0, Math.PI * 2);
                 ctx.fillStyle = 'white';
                 ctx.fill();
 
-                // Inner energy core
                 ctx.globalCompositeOperation = 'lighter';
                 ctx.beginPath();
                 ctx.arc(mouse.x, mouse.y, Math.max(0, orbRadius / 3 + pulse / 2), 0, Math.PI * 2);
@@ -233,14 +227,11 @@
             requestAnimationFrame(animate);
         }
 
-        // --- Event Listeners ---
         function addEventListeners() {
             const updateMousePosition = (e) => {
-                // FIX: Check for touch event properties first, then fallback to mouse properties.
                 const newX = e.touches ? e.touches[0].clientX : e.clientX;
                 const newY = e.touches ? e.touches[0].clientY : e.clientY;
 
-                // If newX/newY are not numbers, something is wrong, so we exit.
                 if (typeof newX !== 'number' || typeof newY !== 'number') return;
 
                 if (mouse.px !== null && mouse.py !== null) {
@@ -258,20 +249,31 @@
             canvas.addEventListener('mousemove', updateMousePosition);
             canvas.addEventListener('touchmove', updateMousePosition, { passive: false });
             
-            canvas.addEventListener('mouseleave', () => {
+            const deactivateMouse = () => {
                 mouse.isActive = false;
                 mouse.px = null;
                 mouse.py = null;
+            };
+            canvas.addEventListener('mouseleave', deactivateMouse);
+
+            canvas.addEventListener('mousedown', () => { mouse.isDown = true; });
+            canvas.addEventListener('mouseup', () => mouse.isDown = false);
+            
+            canvas.addEventListener('touchstart', (e) => { 
+                e.preventDefault(); 
+                mouse.isDown = true; 
+                updateMousePosition(e); 
+            }, { passive: false });
+            
+            // FIX: On touchend, deactivate the cursor entirely
+            canvas.addEventListener('touchend', () => {
+                mouse.isDown = false;
+                deactivateMouse();
             });
 
-            canvas.addEventListener('mousedown', () => { mouse.isDown = true; shockwave = 1; });
-            canvas.addEventListener('mouseup', () => mouse.isDown = false);
-            canvas.addEventListener('touchstart', (e) => { e.preventDefault(); mouse.isDown = true; shockwave = 1; updateMousePosition(e); }, { passive: false });
-            canvas.addEventListener('touchend', () => mouse.isDown = false);
             window.addEventListener('resize', setup);
         }
 
-        // --- Initialization ---
         window.onload = function() {
             setup();
             addEventListeners();
